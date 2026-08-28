@@ -5,7 +5,7 @@
          :git/sha "0c559d78d839f2f9c8cc1a7326a639134134bfac"}
         io.github.casselc/otel
         {:git/url "https://github.com/casselc/otel.git"
-         :git/sha "cac3cbcf1e7101c0a893c3aaffa5a3154c0f766b"}}
+         :git/sha "a9badb98a86d4e0aa207aa0609da03dc8e4c087f"}}
 
  :aliases {:test {:extra-paths ["test"]
                   :main-opts ["-m" "otel.instrumentation.db-test-runner"]}}

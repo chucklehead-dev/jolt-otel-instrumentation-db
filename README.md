@@ -11,11 +11,15 @@ records only:
 
 - a closed SQL operation class such as `SELECT` or `INSERT`;
 - a closed database system name such as `clickhouse`, `duckdb`, or `sqlite`;
-- returned-row counts for result-set operations and affected-row counts for
-  mutations, without inspecting labels or row values;
-- embedded operations as internal spans and PostgreSQL operations as client
-  spans; and
-- a fixed error status and canonical exception type on failure.
+- opt-in returned-row counts for result-set operations and affected-row counts
+  for mutations, without inspecting labels or row values;
+- SQL operations as client spans, including embedded engines as required by the
+  SQL-specific convention;
+- the stable `db.client.operation.duration` histogram in seconds with the
+  standard advisory buckets; and
+- a fixed error status and canonical exception type on failure, plus a
+  correlated `db.client.operation.exception` log event at WARN severity when
+  the logs signal is enabled.
 
 It never records SQL text, parameters, handles, labels, row values, exception
 messages, database paths, endpoints, or credentials. Results and exceptions
@@ -23,6 +27,22 @@ retain their identity. The advice also honors OTel's propagated generic
 instrumentation-suppression context; exporter, receiver, storage, and viewer
 work can therefore bypass the join point before it inspects even a driver
 descriptor.
+
+This provider emits the current stable database and SQL conventions directly;
+it never emitted the pre-1.24 experimental names, so
+`OTEL_SEMCONV_STABILITY_OPT_IN` migration/duplication is not applicable.
+`db.query.text` and query parameters are intentionally omitted because this
+generic seam cannot reliably sanitize arbitrary dialects. Namespace, server,
+collection, and PostgreSQL SQLSTATE attributes are emitted only when a future
+driver metadata/error contract can supply them without parsing query text,
+performing another network call, or exposing credentials.
+
+Row counts are disabled by default because `db.response.returned_rows` is an
+opt-in convention. Set `OTEL_INSTRUMENTATION_DB_CAPTURE_ROW_COUNTS=true` to
+enable both that standard attribute and the library-owned
+`jolt.db.response.affected_rows` attribute. Tests and embedding code can bind
+`otel.instrumentation.db/*capture-row-counts?*` to override the environment for
+a dynamic scope.
 
 ## Select it in a build
 

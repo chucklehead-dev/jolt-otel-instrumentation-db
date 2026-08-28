@@ -4,8 +4,8 @@
 
   The advice observes an already-evaluated `[driver handle sql params]` vector.
   It records only a closed SQL operation class and a closed database-system
-  name. SQL text, parameters, handles, result values, exception messages, and
-  connection coordinates are never retained."
+  name and bounded result cardinalities. SQL text, parameters, handles, row
+  values, exception messages, and connection coordinates are never retained."
   (:require [clojure.string :as str]
             [db.driver :as driver]
             [otel.context :as context]
@@ -75,6 +75,24 @@
     (or (some-> error class .getName) "UnknownExceptionType")
     (catch :default _ "UnknownExceptionType")))
 
+(def ^:private result-set-operations #{"SELECT" "WITH" "EXPLAIN" "CALL"})
+(def ^:private mutation-operations #{"INSERT" "UPDATE" "DELETE" "MERGE" "COPY"})
+
+(defn- record-result-cardinality! [span operation result]
+  ;; The driver SPI guarantees an eager result map. Validate the public shape
+  ;; anyway: instrumentation must never turn an unusual driver result into an
+  ;; application failure, and it must never inspect labels or row values.
+  (when (map? result)
+    (let [rows (:rows result)
+          affected (:count result)]
+      (when (and (contains? result-set-operations operation) (vector? rows))
+        (trace/set-attribute! span :db.response.returned_rows (count rows)))
+      (when (and (contains? mutation-operations operation)
+                 (integer? affected) (not (neg? affected)))
+        ;; OTel currently standardizes returned rows but not affected rows.
+        ;; Keep this useful mutation count in the library-owned namespace.
+        (trace/set-attribute! span :jolt.db.response.affected_rows affected)))))
+
 (defn- traced [db-driver sql proceed]
   (let [descriptor (safe-descriptor db-driver)
         operation (operation-name sql)
@@ -89,6 +107,7 @@
       (trace/with-current-span span
         (try
           (let [result (proceed)]
+            (record-result-cardinality! span operation result)
             result)
           (catch :default error
             (let [error-type (exception-type error)]

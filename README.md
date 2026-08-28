@@ -11,11 +11,13 @@ records only:
 
 - a closed SQL operation class such as `SELECT` or `INSERT`;
 - a closed database system name such as `clickhouse`, `duckdb`, or `sqlite`;
+- returned-row counts for result-set operations and affected-row counts for
+  mutations, without inspecting labels or row values;
 - embedded operations as internal spans and PostgreSQL operations as client
   spans; and
 - a fixed error status and canonical exception type on failure.
 
-It never records SQL text, parameters, handles, result values, exception
+It never records SQL text, parameters, handles, labels, row values, exception
 messages, database paths, endpoints, or credentials. Results and exceptions
 retain their identity. The advice also honors OTel's propagated generic
 instrumentation-suppression context; exporter, receiver, storage, and viewer

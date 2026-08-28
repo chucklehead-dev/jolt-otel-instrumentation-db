@@ -68,7 +68,8 @@
                (:parent-span-id database)))
         (is (= "clickhouse" (get (:attributes database) "db.system.name")))
         (is (= "SELECT" (get (:attributes database) "db.operation.name")))
-        (is (nil? (get (:attributes database) "db.response.returned_rows")))
+        (is (= 1 (get (:attributes database) "db.response.returned_rows")))
+        (is (nil? (get (:attributes database) "jolt.db.response.affected_rows")))
         (doseq [secret ["private_value" "customer" "secret-parameter"
                         "secret-handle" "secret-row"]]
           (is (not (.contains serialized secret))))))))
@@ -83,7 +84,22 @@
        (fn [] {:labels [] :rows [] :count 2}))
       (let [span (first (memory/spans exporter))]
         (is (= "DELETE" (:name span)))
-        (is (= :client (:kind span)))))))
+        (is (= :client (:kind span)))
+        (is (= 2 (get (:attributes span) "jolt.db.response.affected_rows")))
+        (is (nil? (get (:attributes span) "db.response.returned_rows")))))))
+
+(deftest malformed-result-cardinality-is-ignored
+  (with-memory-sdk
+    (fn [exporter]
+      (let [result {:rows (Object.) :count -1}
+            observed (instrumentation/around
+                      (join-point)
+                      [(test-driver {:id :duckdb}) nil "SELECT 1" []]
+                      (fn [] result))
+            span (first (memory/spans exporter))]
+        (is (identical? result observed))
+        (is (nil? (get (:attributes span) "db.response.returned_rows")))
+        (is (nil? (get (:attributes span) "jolt.db.response.affected_rows")))))))
 
 (deftest exception-identity-and-message-privacy
   (with-memory-sdk

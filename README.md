@@ -9,7 +9,8 @@ no OpenTelemetry dependency or generated database spans.
 The initial contract instruments the synchronous driver execution boundary and
 records only:
 
-- a closed SQL operation class such as `SELECT` or `INSERT`;
+- a closed SQL operation class such as `SELECT` or `INSERT` only for one
+  bounded, lexically complete simple statement;
 - a closed database system name such as `clickhouse`, `duckdb`, or `sqlite`;
 - opt-in returned-row counts for result-set operations and affected-row counts
   for mutations, without inspecting labels or row values;
@@ -27,6 +28,15 @@ retain their identity. The advice also honors OTel's propagated generic
 instrumentation-suppression context; exporter, receiver, storage, and viewer
 work can therefore bypass the join point before it inspects even a driver
 descriptor.
+
+The generic seam does not supply operation metadata independently of query
+text. Its temporary classifier therefore fails closed: compound statements,
+CTEs, unknown or dialect-dependent quoting, unbalanced lexical forms, and SQL
+larger than the bounded scan omit `db.operation.name` and use `db.system.name`
+as the span name. Semicolons inside ordinary quoted strings or identifiers do
+not make a simple statement compound. Telemetry observation and finalization
+are fail-open, and the span and duration histogram use the same monotonic
+interval.
 
 This provider emits the current stable database and SQL conventions directly;
 it never emitted the pre-1.24 experimental names, so

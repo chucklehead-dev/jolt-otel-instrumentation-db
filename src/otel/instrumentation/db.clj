@@ -42,23 +42,121 @@
   #{"SELECT" "INSERT" "UPDATE" "DELETE" "MERGE"
     "CREATE" "ALTER" "DROP" "TRUNCATE"
     "BEGIN" "COMMIT" "ROLLBACK" "SAVEPOINT" "RELEASE"
-    "PRAGMA" "EXPLAIN" "WITH" "CALL" "COPY"})
+    "PRAGMA" "EXPLAIN" "CALL" "COPY"})
+
+(defn- sql-shape
+  "Return the first word only when `sql` is one bounded, lexically complete
+  statement. This is deliberately a recognizer, not a SQL parser. Anything
+  dialect-dependent or ambiguous fails closed without returning query text."
+  [sql]
+  (when (and (string? sql) (<= (count sql) max-operation-scan))
+    (let [size (count sql)]
+      (loop [index 0
+             state :code
+             word nil
+             ended? false]
+        (if (= index size)
+          (when (and (contains? #{:code :line-comment} state)
+                     (some? word))
+            word)
+          (let [ch (nth sql index)
+                next-ch (when (< (inc index) size) (nth sql (inc index)))]
+            (case state
+              :line-comment
+              (if (or (= ch \newline) (= ch \return))
+                (recur (inc index) :code word ended?)
+                (recur (inc index) state word ended?))
+
+              :block-comment
+              (cond
+                (and (= ch \*) (= next-ch \/))
+                (recur (+ index 2) :code word ended?)
+
+                ;; Nested block comments are dialect-dependent. Do not risk
+                ;; interpreting a separator under the wrong nesting rules.
+                (and (= ch \/) (= next-ch \*)) nil
+                :else (recur (inc index) state word ended?))
+
+              :single-quote
+              (cond
+                ;; Standard SQL escapes a quote by doubling it.
+                (and (= ch \') (= next-ch \'))
+                (recur (+ index 2) state word ended?)
+                (= ch \') (recur (inc index) :code word ended?)
+                ;; Backslash string escaping varies by database and settings.
+                (= ch \\) nil
+                :else (recur (inc index) state word ended?))
+
+              :double-quote
+              (cond
+                (and (= ch \") (= next-ch \"))
+                (recur (+ index 2) state word ended?)
+                (= ch \") (recur (inc index) :code word ended?)
+                :else (recur (inc index) state word ended?))
+
+              :backtick-quote
+              (cond
+                (and (= ch \`) (= next-ch \`))
+                (recur (+ index 2) state word ended?)
+                (= ch \`) (recur (inc index) :code word ended?)
+                (= ch \\) nil
+                :else (recur (inc index) state word ended?))
+
+              :code
+              (cond
+                (or (= ch \space) (= ch \tab) (= ch \newline)
+                    (= ch \return) (= ch \formfeed))
+                (recur (inc index) state word ended?)
+
+                (and (= ch \-) (= next-ch \-))
+                (recur (+ index 2) :line-comment word ended?)
+
+                (and (= ch \/) (= next-ch \*))
+                (recur (+ index 2) :block-comment word ended?)
+
+                (= ch \;)
+                (if ended?
+                  nil
+                  (recur (inc index) state word true))
+
+                ended? nil
+
+                (= ch \') (recur (inc index) :single-quote word ended?)
+                (= ch \") (recur (inc index) :double-quote word ended?)
+                (= ch \`) (recur (inc index) :backtick-quote word ended?)
+
+                ;; PostgreSQL dollar quoting, bracket quoting, and similar
+                ;; extensions need a dialect-specific parser. Fail closed.
+                (or (= ch \$) (= ch \[)) nil
+
+                (and (nil? word)
+                     (or (<= (int \A) (int ch) (int \Z))
+                         (<= (int \a) (int ch) (int \z))))
+                (let [end (loop [cursor index]
+                            (if (and (< cursor size)
+                                     (let [candidate (nth sql cursor)]
+                                       (or (<= (int \A) (int candidate) (int \Z))
+                                           (<= (int \a) (int candidate) (int \z)))))
+                              (recur (inc cursor))
+                              cursor))]
+                  (recur end state (subs sql index end) ended?))
+
+                ;; A statement whose first token is not a bare word has no
+                ;; operation name this generic seam can safely identify.
+                (nil? word) nil
+                :else (recur (inc index) state word ended?)))))))))
 
 (defn operation-name
-  "Return a bounded, low-cardinality SQL operation name.
+  "Return a conservative, low-cardinality SQL operation name, or nil.
 
-  Leading whitespace and ordinary line/block comments are ignored. Unknown,
-  malformed, and non-string inputs become `UNKNOWN`; the returned value never
-  contains caller SQL text."
+  Leading whitespace and ordinary line/block comments are ignored. The result
+  is omitted for compound statements, CTEs, dialect-dependent lexical forms,
+  truncated input, malformed input, and unknown operations. The returned value
+  never contains caller SQL text. This narrow fallback exists because the
+  current driver seam does not yet provide operation metadata directly."
   [sql]
-  (if-not (string? sql)
-    "UNKNOWN"
-    (let [sample (subs sql 0 (min max-operation-scan (count sql)))
-          match (re-find
-                  #"(?is)^(?:\s|--[^\r\n]*(?:\r?\n|$)|/\*.*?\*/)*([A-Za-z]+)"
-                  sample)
-          operation (some-> (second match) str/upper-case)]
-      (if (contains? known-operations operation) operation "UNKNOWN"))))
+  (let [operation (some-> (sql-shape sql) str/upper-case)]
+    (when (contains? known-operations operation) operation)))
 
 (defn- safe-descriptor [db-driver]
   (try
@@ -102,35 +200,31 @@
   ;; With no safe collection/namespace/server target, the stable convention is
   ;; the operation alone. The database system is the fallback when there is no
   ;; recognized operation; it is not itself a `{target}` placeholder.
-  (if (= "UNKNOWN" operation) system operation))
+  (or operation system))
 
 (defn- exception-type [error]
   (try
     (or (some-> error class .getName) "UnknownExceptionType")
     (catch :default _ "UnknownExceptionType")))
 
-(defn- response-status-code [error]
+(defn- record-failure! [span metric-attributes error]
   (try
-    (let [data (ex-data error)
-          value (or (:db.response/status-code data)
-                    (:db/response-status-code data)
-                    (:sqlstate data))]
-      (when (some? value) (str value)))
+    (let [error-type (exception-type error)]
+      (trace/set-attribute! span :error.type error-type)
+      (swap! metric-attributes assoc :error.type error-type)
+      (logs/emit! (sdk/logger scope-name {:version instrumentation-version})
+                  {:event-name "db.client.operation.exception"
+                   :body "database client operation exception"
+                   :severity :warn
+                   ;; Messages, data, and stack traces can contain query text,
+                   ;; values, paths, and credentials. Raw SQLSTATE-like values
+                   ;; are likewise untrusted until the driver SPI supplies an
+                   ;; explicit bounded error metadata contract.
+                   :attributes {:exception.type error-type}})
+      (trace/set-status! span :error "database operation failed"))
     (catch :default _ nil)))
 
-(defn- record-exception! [error-type]
-  (try
-    (logs/emit! (sdk/logger scope-name {:version instrumentation-version})
-                {:event-name "db.client.operation.exception"
-                 :body "database client operation exception"
-                 :severity :warn
-                 ;; Messages and stack traces can contain query text, values,
-                 ;; paths, and credentials. The type alone satisfies the event
-                 ;; contract without weakening the default privacy boundary.
-                 :attributes {:exception.type error-type}})
-    (catch :default _ nil)))
-
-(def ^:private result-set-operations #{"SELECT" "WITH" "EXPLAIN" "CALL"})
+(def ^:private result-set-operations #{"SELECT" "EXPLAIN" "CALL"})
 (def ^:private mutation-operations #{"INSERT" "UPDATE" "DELETE" "MERGE" "COPY"})
 
 (defn- capture-row-counts? []
@@ -145,32 +239,53 @@
   ;; The driver SPI guarantees an eager result map. Validate the public shape
   ;; anyway: instrumentation must never turn an unusual driver result into an
   ;; application failure, and it must never inspect labels or row values.
-  (when (and (capture-row-counts?) (map? result))
-    (let [rows (:rows result)
-          affected (:count result)]
-      (when (and (contains? result-set-operations operation) (vector? rows))
-        (trace/set-attribute! span :db.response.returned_rows (count rows)))
-      (when (and (contains? mutation-operations operation)
-                 (integer? affected) (not (neg? affected)))
-        ;; OTel currently standardizes returned rows but not affected rows.
-        ;; Keep this useful mutation count in the library-owned namespace.
-        (trace/set-attribute! span :jolt.db.response.affected_rows affected)))))
+  (try
+    (when (and (capture-row-counts?) (map? result))
+      (let [rows (:rows result)
+            affected (:count result)]
+        (when (and (contains? result-set-operations operation) (vector? rows))
+          (trace/set-attribute! span :db.response.returned_rows (count rows)))
+        (when (and (contains? mutation-operations operation)
+                   (integer? affected) (not (neg? affected)))
+          ;; OTel currently standardizes returned rows but not affected rows.
+          ;; Keep this useful mutation count in the library-owned namespace.
+          (trace/set-attribute! span :jolt.db.response.affected_rows affected))))
+    (catch :default _ nil)))
+
+(defn- finish! [span start-wall start-mono metric-attributes]
+  ;; Derive both signals from one monotonic interval. The wall-clock anchor is
+  ;; used only to place the span on the exported timeline. Finalization is fully
+  ;; fail-open so telemetry cannot replace a result or the original Throwable.
+  (let [end-mono (try (host/mono-nanos) (catch :default _ nil))
+        elapsed (when end-mono (max 0 (- end-mono start-mono)))]
+    (try
+      (if elapsed
+        (trace/end! span (+ start-wall elapsed))
+        (trace/end! span))
+      (catch :default _ nil))
+    (when elapsed
+      (try
+        (metrics/record! (duration-instrument)
+                         (/ elapsed 1000000000.0)
+                         @metric-attributes)
+        (catch :default _ nil)))))
 
 (defn- traced [db-driver sql proceed]
   (let [descriptor (safe-descriptor db-driver)
         operation (operation-name sql)
         system (system-name descriptor)
         tracer (sdk/tracer scope-name {:version instrumentation-version})
-        started (host/mono-nanos)
-        metric-attributes (atom {:db.system.name system
-                                 :db.operation.name operation})
+        start-wall (host/wall-nanos)
+        start-mono (host/mono-nanos)
+        attributes (cond-> {:db.system.name system}
+                     operation (assoc :db.operation.name operation))
+        metric-attributes (atom attributes)
         span (trace/start-span tracer (span-name operation system)
                                ;; SQL semantic conventions require CLIENT even
                                ;; for embedded SQL engines.
                                {:kind :client
-                                :attributes
-                                {:db.system.name system
-                                 :db.operation.name operation}})]
+                                :attributes attributes
+                                :start-timestamp start-wall})]
     (try
       (trace/with-current-span span
         (try
@@ -178,22 +293,10 @@
             (record-result-cardinality! span operation result)
             result)
           (catch :default error
-            (let [error-type (exception-type error)
-                  response-code (response-status-code error)]
-              (trace/set-attribute! span :error.type error-type)
-              (swap! metric-attributes assoc :error.type error-type)
-              (when response-code
-                (trace/set-attribute! span :db.response.status_code response-code)
-                (swap! metric-attributes assoc
-                       :db.response.status_code response-code))
-              (record-exception! error-type))
-            (trace/set-status! span :error "database operation failed")
+            (record-failure! span metric-attributes error)
             (throw error))))
       (finally
-        (trace/end! span)
-        (metrics/record! (duration-instrument)
-                         (/ (- (host/mono-nanos) started) 1000000000.0)
-                         @metric-attributes)))))
+        (finish! span start-wall start-mono metric-attributes)))))
 
 (defn around
   "Create one duration span around a synchronous driver execution.

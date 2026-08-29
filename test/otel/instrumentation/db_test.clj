@@ -6,6 +6,8 @@
             [otel.context :as context]
             [otel.exporter.memory :as memory]
             [otel.instrumentation.db :as instrumentation]
+            [otel.logs :as logs]
+            [otel.metrics :as metrics]
             [otel.sdk :as sdk]
             [otel.trace :as trace]))
 
@@ -41,9 +43,20 @@
           [[" SELECT * FROM private_customer" "SELECT"]
            ["-- private tenant\ninsert into t values (?)" "INSERT"]
            ["/* secret */ UPDATE t SET token = ?" "UPDATE"]
-           ["vacuum private_customer" "UNKNOWN"]
-           ["totally-secret-unparseable" "UNKNOWN"]
-           [nil "UNKNOWN"]]]
+           ["SELECT ';' AS value" "SELECT"]
+           ["SELECT \"semi;colon\" FROM t; -- trailing" "SELECT"]
+           ["SELECT `semi;colon` FROM t" "SELECT"]
+           ["SELECT 1 /* ; UPDATE private */" "SELECT"]
+           ["SELECT 1 -- ; UPDATE private" "SELECT"]
+           ["SELECT 1; UPDATE private SET token = ?" nil]
+           ["WITH private AS (SELECT 1) SELECT * FROM private" nil]
+           ["/* unclosed private comment" nil]
+           ["SELECT 'unclosed private value" nil]
+           ["SELECT $private$;$private$" nil]
+           ["vacuum private_customer" nil]
+           ["totally-secret-unparseable" nil]
+           [(apply str (repeat 4097 "x")) nil]
+           [nil nil]]]
     (is (= expected (instrumentation/operation-name sql)))))
 
 (deftest result-identity-parentage-and-safe-attributes
@@ -131,7 +144,7 @@
                        (catch :default error error))
             span (first (memory/spans exporter))
             event (first (memory/records exporter))
-            serialized (pr-str span)]
+            serialized (pr-str [span event])]
         (is (identical? failure observed))
         (is (= :error (get-in span [:status :code])))
         (is (= "database operation failed"
@@ -149,7 +162,7 @@
                         "private-arg"]]
           (is (not (.contains serialized secret))))))))
 
-(deftest duration-metric-uses-stable-name-unit-and-operation-attributes
+(deftest one-call-emits-one-span-and-one-matching-duration-point
   (let [exporter (memory/multisignal-exporter)
         handle (sdk/init! {:service-name "db-instrumentation-metric-test"
                            :exporter exporter :processor :simple
@@ -161,25 +174,41 @@
        [(test-driver {:id :postgresql}) nil "SELECT 1" []]
        (fn [] {:labels ["one"] :rows [[1]] :count 0}))
       (is (sdk/force-flush! handle))
-      (let [metric (first (filter #(= "db.client.operation.duration" (:name %))
-                                  (memory/metrics exporter)))
+      (let [spans (memory/spans exporter)
+            duration-metrics
+            (filter #(= "db.client.operation.duration" (:name %))
+                    (memory/metrics exporter))
+            metric (first duration-metrics)
             point (first (:data-points metric))]
+        (is (= 1 (count spans)))
+        (is (= 1 (count duration-metrics)))
+        (is (= 1 (count (:data-points metric))))
+        (is (= 1 (:count point)))
+        (is (empty? (memory/records exporter)))
         (is (= "s" (:unit metric)))
         (is (= [0.001 0.005 0.01 0.05 0.1 0.5 1.0 5.0 10.0]
                (:explicit-bounds metric)))
         (is (= "postgresql" (get (:attributes point) "db.system.name")))
         (is (= "SELECT" (get (:attributes point) "db.operation.name")))
-        (is (not (neg? (:sum point)))))
+        (is (not (neg? (:sum point))))
+        (let [span (first spans)
+              span-duration (/ (- (:end-time-unix-nano span)
+                                  (:start-time-unix-nano span))
+                               1000000000.0)]
+          (is (= span-duration (:sum point)))))
       (finally
         (sdk/shutdown! handle)))))
 
-(deftest database-response-status-code-is-propagated-to-span-and-metric
+(deftest raw-exception-data-is-not-treated-as-driver-status-metadata
   (let [exporter (memory/multisignal-exporter)
         handle (sdk/init! {:service-name "db-instrumentation-status-test"
                            :exporter exporter :processor :simple
                            :runtime-metrics? false :logs? true
                            :bridge-logging? false})
-        failure (ex-info "private" {:sqlstate "42P01"})]
+        failure (ex-info "private"
+                         {:sqlstate "42P01"
+                          :db.response/status-code "secret-status"
+                          :db/response-status-code "other-secret"})]
     (try
       (try
         (instrumentation/around
@@ -188,15 +217,74 @@
          (fn [] (throw failure)))
         (catch :default _ nil))
       (is (sdk/force-flush! handle))
-      (let [span (first (memory/spans exporter))
-            metric (first (filter #(= "db.client.operation.duration" (:name %))
-                                  (memory/metrics exporter)))
-            attrs (:attributes (first (:data-points metric)))]
-        (is (= "42P01" (get (:attributes span) "db.response.status_code")))
-        (is (= "42P01" (get attrs "db.response.status_code")))
-        (is (= "clojure.lang.ExceptionInfo" (get attrs "error.type"))))
+      (let [spans (memory/spans exporter)
+            records (memory/records exporter)
+            metrics (filter #(= "db.client.operation.duration" (:name %))
+                            (memory/metrics exporter))
+            span (first spans)
+            attrs (:attributes (first (:data-points (first metrics))))
+            serialized (pr-str [spans records metrics])]
+        (is (= 1 (count spans)))
+        (is (= 1 (count records)))
+        (is (= 1 (count metrics)))
+        (is (= 1 (count (:data-points (first metrics)))))
+        (is (= 1 (:count (first (:data-points (first metrics))))))
+        (is (nil? (get (:attributes span) "db.response.status_code")))
+        (is (nil? (get attrs "db.response.status_code")))
+        (is (= "clojure.lang.ExceptionInfo" (get attrs "error.type")))
+        (doseq [secret ["42P01" "secret-status" "other-secret"]]
+          (is (not (.contains serialized secret)))))
       (finally
         (sdk/shutdown! handle)))))
+
+(deftest ambiguous-operation-is-omitted-from-signals
+  (with-memory-sdk
+    (fn [exporter]
+      (let [result {:labels [] :rows [] :count 0}
+            observed (instrumentation/around
+                      (join-point)
+                      [(test-driver {:id :postgresql}) nil
+                       "WITH private AS (SELECT 1) SELECT * FROM private" []]
+                      (fn [] result))
+            span (first (memory/spans exporter))]
+        (is (identical? result observed))
+        (is (= "postgresql" (:name span)))
+        (is (nil? (get (:attributes span) "db.operation.name")))
+        (is (not (.contains (pr-str span) "private")))))))
+
+(deftest telemetry-faults-never-mask-application-outcomes
+  (let [result (Object.)
+        failure (ex-info "application failure" {:private true})
+        call (fn [proceed]
+               (instrumentation/around
+                (join-point)
+                [(test-driver {:id :duckdb}) nil "SELECT 1" []]
+                proceed))]
+    (testing "result observation and finalization are fail-open"
+      (with-redefs [trace/set-attribute!
+                    (fn [& _] (throw (ex-info "telemetry attr failed" {})))
+                    trace/end!
+                    (fn [& _] (throw (ex-info "telemetry end failed" {})))
+                    metrics/record!
+                    (fn [& _] (throw (ex-info "telemetry metric failed" {})))]
+        (binding [instrumentation/*capture-row-counts?* true]
+          (is (identical? result (call (fn [] result)))))))
+    (testing "failure observation preserves the original Throwable"
+      (with-redefs [trace/set-attribute!
+                    (fn [& _] (throw (ex-info "telemetry attr failed" {})))
+                    trace/set-status!
+                    (fn [& _] (throw (ex-info "telemetry status failed" {})))
+                    logs/emit!
+                    (fn [& _] (throw (ex-info "telemetry log failed" {})))
+                    trace/end!
+                    (fn [& _] (throw (ex-info "telemetry end failed" {})))
+                    metrics/record!
+                    (fn [& _] (throw (ex-info "telemetry metric failed" {})))]
+        (is (identical?
+             failure
+             (try
+               (call (fn [] (throw failure)))
+               (catch :default error error))))))))
 
 (deftest malformed-descriptor-does-not-change-application-result
   (with-memory-sdk

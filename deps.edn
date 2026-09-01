@@ -4,7 +4,7 @@
 
  :deps {io.github.casselc/db
         {:git/url "https://github.com/casselc/db.git"
-         :git/sha "1111e71faff5e1b89f39d8359913e13089d346d7"}
+         :git/sha "a5bf25d9e141e8dcf28d6d07cd053fceb0019563"}
         io.github.casselc/otel
         {:git/url "https://github.com/casselc/otel.git"
          :git/sha "b18830ae1fc6eef6add5e059ae302e94a1f0ed70"}}

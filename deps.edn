@@ -1,11 +1,13 @@
 {:paths ["src"]
 
+ :jolt/min-version "0.8.0"
+
  :deps {io.github.casselc/db
         {:git/url "https://github.com/casselc/db.git"
-         :git/sha "0c559d78d839f2f9c8cc1a7326a639134134bfac"}
+         :git/sha "1111e71faff5e1b89f39d8359913e13089d346d7"}
         io.github.casselc/otel
         {:git/url "https://github.com/casselc/otel.git"
-         :git/sha "a9badb98a86d4e0aa207aa0609da03dc8e4c087f"}}
+         :git/sha "ebcb0d1b36532155452d7a75842e232f7feeb548"}}
 
  :aliases {:test {:extra-paths ["test"]
                   :main-opts ["-m" "otel.instrumentation.db-test-runner"]}}

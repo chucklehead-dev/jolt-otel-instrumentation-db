@@ -54,6 +54,18 @@ enable both that standard attribute and the library-owned
 `otel.instrumentation.db/*capture-row-counts?*` to override the environment for
 a dynamic scope.
 
+## Requirements
+
+Jolt v0.8.0 or newer. The pinned database driver uses Jolt 0.8's value-first
+FFI write API, and this library declares the same minimum version. Older Jolt
+releases that do not enforce `:jolt/min-version` are not supported.
+
+The repository CI runs the plain provider and manifest suite on the official
+Jolt v0.8.0 release. That release-level gate does not compile or select
+aspects. A woven application currently requires an explicitly selected
+aspect-capable compiler, such as the validated Jolt revision `d1847f81`, or a
+future release that includes compiler aspect support.
+
 ## Select it in a build
 
 Add this library and the exact database fork to `:deps`, then select the
@@ -69,6 +81,12 @@ library-owned manifest in `:jolt/build`:
 The provider deliberately supports only the manifest's exact source-seam
 compatibility id. A changed database boundary must publish a new compatibility
 id and be reviewed before instrumentation can be selected again.
+
+The central [`jolt-aspect-packs`](https://github.com/chucklehead-dev/jolt-aspect-packs)
+`db-aspect-smoke` and `db-plain-smoke` targets are the compiled woven and plain
+conformance gates. Its current `main` remains architectural evidence until it
+is repinned to this provider revision; do not infer exact-tip woven support from
+this repository's official-v0.8.0 provider test alone.
 
 ## Test
 

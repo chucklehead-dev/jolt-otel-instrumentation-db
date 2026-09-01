@@ -178,10 +178,14 @@
   (let [resource (io/resource "META-INF/jolt/aspects/db-jdbc-shim.edn")
         manifest (some-> resource slurp edn/read-string)]
     (is (some? resource))
-    (is (= 'jolt-lang/db (get-in manifest [:library :id])))
-    (is (= instrumentation/db-build-id
-           (get-in manifest [:library :version])))
-    (is (= {:ns 'db.jdbc-shim
-            :call 'db.driver/execute-handle
-            :arity 4}
-           (get-in manifest [:aspects 0 :match])))))
+    (is (= {:schema 1
+            :library {:id 'jolt-lang/db
+                      :version instrumentation/db-build-id}
+            :aspects
+            [{:id :db.jdbc-shim/execute
+              :match {:ns 'db.jdbc-shim
+                      :call 'db.driver/execute-handle
+                      :arity 4}
+              :advice-role :db/client
+              :expect {:matches 1}}]}
+           manifest))))

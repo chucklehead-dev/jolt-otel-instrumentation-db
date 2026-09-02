@@ -22,7 +22,10 @@
   {:id :db.jdbc-shim/execute
    :advice-role :db/client
    :contract :args-v1
-   :match {:ns 'db.jdbc-shim :call 'db.driver/execute-handle :arity 4}
+   :match {:arity 4
+           :call 'db.driver/execute-handle
+           :marker :db.jdbc-shim/execute
+           :ns 'db.jdbc-shim}
    :library {:id 'jolt-lang/db :version instrumentation/db-build-id}})
 
 (defn- with-memory-sdk [f]
@@ -342,7 +345,20 @@
     (is (= 'jolt-lang/db (get-in manifest [:library :id])))
     (is (= instrumentation/db-build-id
            (get-in manifest [:library :version])))
-    (is (= {:ns 'db.jdbc-shim
+    (is (= {:arity 4
             :call 'db.driver/execute-handle
-            :arity 4}
+            :marker :db.jdbc-shim/execute
+            :ns 'db.jdbc-shim}
            (get-in manifest [:aspects 0 :match])))))
+
+(deftest package-owned-basic-preset-selects-the-versioned-provider
+  (let [resource-name "META-INF/jolt/instrumentation/db/basic.edn"
+        resource (io/resource resource-name)
+        preset (some-> resource slurp edn/read-string)]
+    (is (some? resource))
+    (is (= {:schema 1
+            :id :otel.db/basic
+            :selections
+            [{:resource "META-INF/jolt/aspects/db-jdbc-shim.edn"
+              :provider 'otel.instrumentation.db}]}
+           preset))))

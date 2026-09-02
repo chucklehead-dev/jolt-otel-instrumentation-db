@@ -1,0 +1,5 @@
+{:schema 1
+ :id :otel.db/basic
+ :selections
+ [{:resource "META-INF/jolt/aspects/db-jdbc-shim.edn"
+   :provider otel.instrumentation.db}]}

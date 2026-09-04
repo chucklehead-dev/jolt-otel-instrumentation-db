@@ -62,9 +62,12 @@ releases that do not enforce `:jolt/min-version` are not supported.
 
 The repository CI runs the plain provider and manifest suite on the official
 Jolt v0.8.0 release. That release-level gate does not compile or select
-aspects. A woven application currently requires an explicitly selected
-aspect-capable compiler, such as the validated Jolt revision `d1847f81`, or a
-future release that includes compiler aspect support.
+aspects. Woven applications currently require the canonical aspect compiler
+`casselc/jolt:integration/aspects@717eaeef8e9dca3d53045dadcdb8ae6d081500dd`
+or a reviewed descendant. The consuming observability demo retains the
+reviewed effect-closure ancestor `523c8d89929e9867563faa48d863c4df05a0d849`
+for its exact build evidence; that commit is an ancestor of the canonical
+line. A future upstream release may replace this fork requirement.
 
 ## Select it in a build
 
@@ -81,6 +84,9 @@ library-owned manifest in `:jolt/build`:
 The provider deliberately supports only the manifest's exact source-seam
 compatibility id. A changed database boundary must publish a new compatibility
 id and be reviewed before instrumentation can be selected again.
+The selected entry has arity four, so the compiler's `:args-v1` advice vector
+is exactly `[driver handle sql params]`; the provider does not reconstruct or
+re-evaluate those arguments.
 
 The central [`jolt-aspect-packs`](https://github.com/chucklehead-dev/jolt-aspect-packs)
 `db-aspect-smoke` and `db-plain-smoke` targets are the compiled woven and plain

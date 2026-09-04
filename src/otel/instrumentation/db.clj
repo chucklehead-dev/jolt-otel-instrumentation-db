@@ -16,7 +16,7 @@
             [otel.trace :as trace]))
 
 (def db-build-id
-  "Compatibility id of the exact jolt-lang/db call seam selected by the
+  "Compatibility id of the exact jolt-lang/db execution seam selected by the
   library-owned manifest. The resource-only manifest commit is intentionally
   separate from this source compatibility id."
   "a55c554a66d8f5e9e5198e238773f8218f6050d7")

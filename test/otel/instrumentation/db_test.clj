@@ -23,9 +23,7 @@
    :advice-role :db/client
    :contract :args-v1
    :match {:arity 4
-           :call 'db.driver/execute-handle
-           :marker :db.jdbc-shim/execute
-           :ns 'db.jdbc-shim}
+           :entry 'db.jdbc-shim/observed-driver-execute-handle}
    :library {:id 'jolt-lang/db :version instrumentation/db-build-id}})
 
 (defn- with-memory-sdk [f]
@@ -346,9 +344,7 @@
     (is (= instrumentation/db-build-id
            (get-in manifest [:library :version])))
     (is (= {:arity 4
-            :call 'db.driver/execute-handle
-            :marker :db.jdbc-shim/execute
-            :ns 'db.jdbc-shim}
+            :entry 'db.jdbc-shim/observed-driver-execute-handle}
            (get-in manifest [:aspects 0 :match])))))
 
 (deftest package-owned-basic-preset-selects-the-versioned-provider
